@@ -9,9 +9,10 @@
 #   claudeclip_copy   - re-copy the last export (/tmp/claude-conversation-export.md)
 
 claudeclip() {
-  local root proj out selected selected_file abs_root
+  local root proj out selected selected_file abs_root include_subagents
   root="${1:-$(pwd)}"
   out="/tmp/claude-conversation-export.md"
+  include_subagents=0
 
   abs_root="$(realpath "$root")"
   # Claude Code encodes the project path by turning every character that is
@@ -194,7 +195,104 @@ claudeclip() {
     fi
   }
 
+  _claudeclip_subagent_row_count() {
+    jq -s -r '
+      [.[] | select(.toolUseResult.outputFile? != null and .toolUseResult.canReadOutputFile == true)]
+      | length
+    ' "$1" 2>/dev/null
+  }
+
   if command -v fzf >/dev/null; then
+    local preview_mode_file preview_script key
+
+    # fzf's preview needs to switch between two very different jq pipelines
+    # (plain vs. plus-subagents) on a keypress. Generating a standalone POSIX
+    # sh script and invoking it (`sh "$preview_script" {1} "$mode_file"`) is
+    # far more readable than trying to nest that much quoting inside a
+    # single --preview string, and it works regardless of the user's $SHELL
+    # (fzf runs --preview/--bind commands with `$SHELL -c`, and exported
+    # bash functions aren't visible there if $SHELL is e.g. zsh).
+    preview_mode_file="$(mktemp)"
+    printf 'plain' > "$preview_mode_file"
+
+    preview_script="$(mktemp)"
+    cat > "$preview_script" <<'PREVIEW_SH'
+#!/bin/sh
+file="$1"
+mode_file="$2"
+
+echo "File: $file"
+echo
+
+jq -s -r '
+  def text_content:
+    if (.message.content | type) == "array" then
+      [.message.content[]? | select(.type=="text") | .text] | join("\n")
+    else
+      (.message.content // "")
+    end;
+
+  .[]
+  | select(.type=="user" or .type=="assistant")
+  | text_content as $text
+  | select($text | gsub("\\s+"; "") | length > 0)
+  | "### " + (
+      if .type == "user" then "User"
+      elif .type == "assistant" then "Assistant"
+      else .type
+      end
+    ) + "\n" + ($text | .[0:1800]) + "\n"
+' "$file" 2>/dev/null | head -180
+
+subagents="$(
+  jq -s -r '
+    .[]
+    | select(.toolUseResult.outputFile? != null and .toolUseResult.canReadOutputFile == true)
+    | [
+        (.toolUseResult.agentId // "?"),
+        (.toolUseResult.description // "Subagent" | gsub("[\t\n\r]"; " ")),
+        .toolUseResult.outputFile
+      ]
+    | @tsv
+  ' "$file" 2>/dev/null
+)"
+
+[ -n "$subagents" ] || exit 0
+
+if [ "$(cat "$mode_file" 2>/dev/null)" = "rich" ]; then
+  echo
+  echo "--- Subagents (ctrl-s to hide) ---"
+  printf '%s\n' "$subagents" | while IFS="$(printf '\t')" read -r agent_id desc output_file; do
+    [ -r "$output_file" ] || continue
+    echo
+    echo "## $desc ($agent_id)"
+    jq -s -r '
+      def text_content:
+        if (.message.content | type) == "array" then
+          [.message.content[]? | select(.type=="text") | .text] | join("\n")
+        else
+          (.message.content // "")
+        end;
+
+      .[]
+      | select(.type=="user" or .type=="assistant")
+      | text_content as $text
+      | select($text | gsub("\\s+"; "") | length > 0)
+      | "### " + (
+          if .type == "user" then "User"
+          elif .type == "assistant" then "Assistant"
+          else .type
+          end
+        ) + "\n" + ($text | .[0:800]) + "\n"
+    ' "$output_file" 2>/dev/null
+  done | head -160
+else
+  count="$(printf '%s\n' "$subagents" | grep -c .)"
+  echo
+  echo "($count subagent transcript(s) available -- ctrl-s to preview)"
+fi
+PREVIEW_SH
+
     selected="$(
       find "$proj" -maxdepth 1 -name "*.jsonl" -type f -printf "%T@ %p\n" \
         | sort -nr \
@@ -206,35 +304,20 @@ claudeclip() {
             --prompt="Resume session> " \
             --delimiter='\t' \
             --with-nth=2,3 \
-            --preview '
-              file={1}
-              echo "File: $file"
-              echo
-              jq -s -r "
-                def text_content:
-                  if (.message.content | type) == \"array\" then
-                    [.message.content[]? | select(.type==\"text\") | .text] | join(\"\n\")
-                  else
-                    (.message.content // \"\")
-                  end;
-
-                .[]
-                | select(.type==\"user\" or .type==\"assistant\")
-                | text_content as \$text
-                | select(\$text | gsub(\"\\\\s+\"; \"\") | length > 0)
-                | \"### \" + (
-                    if .type == \"user\" then \"User\"
-                    elif .type == \"assistant\" then \"Assistant\"
-                    else .type
-                    end
-                  ) + \"\n\" + (\$text | .[0:1800]) + \"\n\"
-              " "$file" 2>/dev/null | head -180
-            '
+            --expect=ctrl-r \
+            --header='enter: export  ·  ctrl-r: export + subagents  ·  ctrl-s: toggle subagent preview' \
+            --bind "ctrl-s:execute-silent([ \"\$(cat \"$preview_mode_file\")\" = plain ] && printf rich > \"$preview_mode_file\" || printf plain > \"$preview_mode_file\")+refresh-preview" \
+            --preview "sh '$preview_script' {1} '$preview_mode_file'"
     )"
 
-    selected_file="$(printf "%s" "$selected" | cut -f1)"
+    rm -f "$preview_mode_file" "$preview_script"
+
+    key="$(printf '%s' "$selected" | sed -n '1p')"
+    [ "$key" = "ctrl-r" ] && include_subagents=1
+
+    selected_file="$(printf "%s" "$selected" | sed -n '2p' | cut -f1)"
   else
-    local files file i choice
+    local files file i choice subagent_answer
     mapfile -t files < <(
       find "$proj" -maxdepth 1 -name "*.jsonl" -type f -printf "%T@ %p\n" \
         | sort -nr \
@@ -269,6 +352,12 @@ claudeclip() {
 
     [[ "$choice" =~ ^[0-9]+$ ]] || return 1
     selected_file="${files[$((choice - 1))]}"
+
+    printf "Include subagent transcripts in export? [y/N]: "
+    read -r subagent_answer
+    case "$subagent_answer" in
+      [Yy]*) include_subagents=1 ;;
+    esac
   fi
 
   [ -n "$selected_file" ] && [ -f "$selected_file" ] || {
@@ -305,7 +394,15 @@ claudeclip() {
     ' "$selected_file"
   } > "$out"
 
-  _claudeclip_subagent_context "$selected_file" >> "$out"
+  if [ "$include_subagents" = "1" ]; then
+    _claudeclip_subagent_context "$selected_file" >> "$out"
+  else
+    local available
+    available="$(_claudeclip_subagent_row_count "$selected_file")"
+    if [ -n "$available" ] && [ "$available" -gt 0 ] 2>/dev/null; then
+      echo "($available subagent transcript(s) available, not included -- ctrl-r in fzf, or answer \"y\" in the fallback prompt)" >&2
+    fi
+  fi
 
   echo "Export size: $(wc -c < "$out") bytes"
 
