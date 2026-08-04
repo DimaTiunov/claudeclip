@@ -35,6 +35,16 @@ the clipboard in one command.
 - **Smart project lookup**: matches Claude Code's directory-encoding scheme,
   falling back to scanning session `cwd` fields if the encoding ever changes.
 - **Noise-free export**: skips empty/tool-only turns and untitled sessions.
+- **Optional subagent context**: if the session launched subagents (the
+  `Agent` tool), you can pull in their full prompt/response transcript as
+  its own `## Subagent: ...` section — not just the "agent launched" notice.
+  Off by default (keeps exports small); press `ctrl-r` in the `fzf` picker
+  (instead of `enter`) to include *all* of them, or `ctrl-s` to open a second
+  picker and choose *which* subagents to include (each with its own preview).
+  The numbered fallback asks a `y`/`N` prompt instead (all-or-nothing, since
+  there's no picker to choose individually without `fzf`). Progress prints
+  as each subagent transcript is pulled in. Skipped gracefully if a
+  subagent's transcript file is no longer on disk (it lives under `/tmp`).
 - **One-shot re-copy** via `claudeclip_copy` if your clipboard got clobbered.
 
 ## Requirements
@@ -69,6 +79,11 @@ claudeclip
 Opens the `fzf` picker scoped to `myproject`'s Claude Code sessions, sorted
 newest first. Pick one, and it's exported to
 `/tmp/claude-conversation-export.md` and copied to your clipboard.
+
+In the picker: `enter` exports the conversation as-is, `ctrl-r` also pulls
+in every subagent transcript, and `ctrl-s` opens a second picker listing
+just that session's subagents (with its own preview per agent) so you can
+select — via `tab` — only the ones you actually want.
 
 ### Export a session from another project
 
