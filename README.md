@@ -35,6 +35,10 @@ the clipboard in one command.
 - **Smart project lookup**: matches Claude Code's directory-encoding scheme,
   falling back to scanning session `cwd` fields if the encoding ever changes.
 - **Noise-free export**: skips empty/tool-only turns and untitled sessions.
+- **Subagent context included**: if the session launched subagents (the
+  `Agent` tool), their full prompt/response transcript is appended as its
+  own `## Subagent: ...` section — not just the "agent launched" notice.
+  Skipped gracefully if the subagent's transcript file is no longer on disk.
 - **One-shot re-copy** via `claudeclip_copy` if your clipboard got clobbered.
 
 ## Requirements

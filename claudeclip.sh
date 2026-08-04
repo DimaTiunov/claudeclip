@@ -139,6 +139,61 @@ claudeclip() {
     printf "%s\t%s\t%s · %s · %s\n" "$file" "$title" "$age" "$branch" "$size"
   }
 
+  _claudeclip_subagent_context() {
+    local session_file="$1" agent_id desc output_file found=0 missing=0
+
+    while IFS=$'\t' read -r agent_id desc output_file; do
+      [ -n "$output_file" ] || continue
+
+      if [ -r "$output_file" ]; then
+        found=$((found + 1))
+        printf '\n\n---\n\n## Subagent: %s (`%s`)\n' "$desc" "$agent_id"
+        jq -s -r '
+          def text_content:
+            if (.message.content | type) == "array" then
+              [.message.content[]? | select(.type=="text") | .text] | join("\n")
+            else
+              (.message.content // "")
+            end;
+
+          .[]
+          | select(.type=="user" or .type=="assistant")
+          | text_content as $text
+          | select($text | gsub("\\s+"; "") | length > 0)
+          | "\n\n### " + (
+              if .type == "user" then "User"
+              elif .type == "assistant" then "Assistant"
+              else .type
+              end
+            ) + "\n\n" + $text
+        ' "$output_file"
+      else
+        missing=$((missing + 1))
+      fi
+    done < <(
+      # outputFile/agentId/description live on the tool-result entry for the
+      # "Agent" tool call, in the *main* session file — the subagent's own
+      # turns live in a separate JSONL under /tmp that may since be gone.
+      jq -s -r '
+        .[]
+        | select(.toolUseResult.outputFile? != null and .toolUseResult.canReadOutputFile == true)
+        | [
+            (.toolUseResult.agentId // "?"),
+            (.toolUseResult.description // "Subagent" | gsub("[\\t\\n\\r]"; " ")),
+            .toolUseResult.outputFile
+          ]
+        | @tsv
+      ' "$session_file" 2>/dev/null
+    )
+
+    if [ "$missing" -gt 0 ]; then
+      echo "($missing subagent transcript(s) no longer on disk, skipped)" >&2
+    fi
+    if [ "$found" -gt 0 ]; then
+      echo "Included $found subagent transcript(s)" >&2
+    fi
+  }
+
   if command -v fzf >/dev/null; then
     selected="$(
       find "$proj" -maxdepth 1 -name "*.jsonl" -type f -printf "%T@ %p\n" \
@@ -249,6 +304,8 @@ claudeclip() {
         ) + "\n\n" + $text
     ' "$selected_file"
   } > "$out"
+
+  _claudeclip_subagent_context "$selected_file" >> "$out"
 
   echo "Export size: $(wc -c < "$out") bytes"
 
