@@ -39,10 +39,12 @@ the clipboard in one command.
   `Agent` tool), you can pull in their full prompt/response transcript as
   its own `## Subagent: ...` section — not just the "agent launched" notice.
   Off by default (keeps exports small); press `ctrl-r` in the `fzf` picker
-  (instead of `enter`) to include it, or answer the `y`/`N` prompt in the
-  numbered fallback. `ctrl-s` in the picker toggles a preview of subagent
-  content before you decide. Skipped gracefully if a subagent's transcript
-  file is no longer on disk (it lives under `/tmp`).
+  (instead of `enter`) to include *all* of them, or `ctrl-s` to open a second
+  picker and choose *which* subagents to include (each with its own preview).
+  The numbered fallback asks a `y`/`N` prompt instead (all-or-nothing, since
+  there's no picker to choose individually without `fzf`). Progress prints
+  as each subagent transcript is pulled in. Skipped gracefully if a
+  subagent's transcript file is no longer on disk (it lives under `/tmp`).
 - **One-shot re-copy** via `claudeclip_copy` if your clipboard got clobbered.
 
 ## Requirements
@@ -79,8 +81,9 @@ newest first. Pick one, and it's exported to
 `/tmp/claude-conversation-export.md` and copied to your clipboard.
 
 In the picker: `enter` exports the conversation as-is, `ctrl-r` also pulls
-in any subagent transcripts, and `ctrl-s` toggles a preview of that
-subagent content in the preview pane so you can check before choosing.
+in every subagent transcript, and `ctrl-s` opens a second picker listing
+just that session's subagents (with its own preview per agent) so you can
+select — via `tab` — only the ones you actually want.
 
 ### Export a session from another project
 

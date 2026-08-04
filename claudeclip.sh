@@ -9,7 +9,7 @@
 #   claudeclip_copy   - re-copy the last export (/tmp/claude-conversation-export.md)
 
 claudeclip() {
-  local root proj out selected selected_file abs_root include_subagents
+  local root proj out selected selected_file abs_root include_subagents subagent_filter
   root="${1:-$(pwd)}"
   out="/tmp/claude-conversation-export.md"
   include_subagents=0
@@ -140,14 +140,50 @@ claudeclip() {
     printf "%s\t%s\t%s · %s · %s\n" "$file" "$title" "$age" "$branch" "$size"
   }
 
+  # $1 = session file. $2 = optional "only include these" filter file, one
+  # outputFile path per line (as produced by the ctrl-s subagent picker);
+  # omit it to include every subagent found in the session (ctrl-r).
   _claudeclip_subagent_context() {
-    local session_file="$1" agent_id desc output_file found=0 missing=0
+    local session_file="$1" filter_file="$2" rows agent_id desc output_file
+    local found=0 missing=0 total idx=0
+
+    # outputFile/agentId/description live on the tool-result entry for the
+    # "Agent" tool call, in the *main* session file — the subagent's own
+    # turns live in a separate JSONL under /tmp that may since be gone.
+    rows="$(
+      jq -s -r '
+        .[]
+        | select(.toolUseResult.outputFile? != null and .toolUseResult.canReadOutputFile == true)
+        | [
+            (.toolUseResult.agentId // "?"),
+            (.toolUseResult.description // "Subagent" | gsub("[\\t\\n\\r]"; " ")),
+            .toolUseResult.outputFile
+          ]
+        | @tsv
+      ' "$session_file" 2>/dev/null
+    )"
+
+    if [ -n "$filter_file" ]; then
+      rows="$(
+        printf '%s\n' "$rows" | while IFS=$'\t' read -r agent_id desc output_file; do
+          [ -n "$output_file" ] || continue
+          grep -Fxq "$output_file" "$filter_file" 2>/dev/null \
+            && printf '%s\t%s\t%s\n' "$agent_id" "$desc" "$output_file"
+        done
+      )"
+    fi
+
+    [ -n "$rows" ] || return 0
+    total="$(printf '%s\n' "$rows" | grep -c .)"
+    echo "Exporting $total subagent transcript(s)..." >&2
 
     while IFS=$'\t' read -r agent_id desc output_file; do
       [ -n "$output_file" ] || continue
+      idx=$((idx + 1))
 
       if [ -r "$output_file" ]; then
         found=$((found + 1))
+        echo "  [$idx/$total] $desc" >&2
         printf '\n\n---\n\n## Subagent: %s (`%s`)\n' "$desc" "$agent_id"
         jq -s -r '
           def text_content:
@@ -171,21 +207,7 @@ claudeclip() {
       else
         missing=$((missing + 1))
       fi
-    done < <(
-      # outputFile/agentId/description live on the tool-result entry for the
-      # "Agent" tool call, in the *main* session file — the subagent's own
-      # turns live in a separate JSONL under /tmp that may since be gone.
-      jq -s -r '
-        .[]
-        | select(.toolUseResult.outputFile? != null and .toolUseResult.canReadOutputFile == true)
-        | [
-            (.toolUseResult.agentId // "?"),
-            (.toolUseResult.description // "Subagent" | gsub("[\\t\\n\\r]"; " ")),
-            .toolUseResult.outputFile
-          ]
-        | @tsv
-      ' "$session_file" 2>/dev/null
-    )
+    done <<< "$rows"
 
     if [ "$missing" -gt 0 ]; then
       echo "($missing subagent transcript(s) no longer on disk, skipped)" >&2
@@ -203,48 +225,24 @@ claudeclip() {
   }
 
   if command -v fzf >/dev/null; then
-    local preview_mode_file preview_script key
+    local subagent_picker_script selection_file key
 
-    # fzf's preview needs to switch between two very different jq pipelines
-    # (plain vs. plus-subagents) on a keypress. Generating a standalone POSIX
-    # sh script and invoking it (`sh "$preview_script" {1} "$mode_file"`) is
-    # far more readable than trying to nest that much quoting inside a
-    # single --preview string, and it works regardless of the user's $SHELL
-    # (fzf runs --preview/--bind commands with `$SHELL -c`, and exported
-    # bash functions aren't visible there if $SHELL is e.g. zsh).
-    preview_mode_file="$(mktemp)"
-    printf 'plain' > "$preview_mode_file"
-
-    preview_script="$(mktemp)"
-    cat > "$preview_script" <<'PREVIEW_SH'
+    # ctrl-s hands off to a *nested* fzf run (fzf's `execute(...)` action
+    # suspends the outer picker and gives the nested command the terminal,
+    # exactly like a subshell would) that lists just this session's
+    # subagents and lets you multi-select which ones to include, instead of
+    # all-or-nothing. It's a standalone POSIX sh script rather than inline
+    # in --bind because embedding a whole second fzf invocation's quoting
+    # inside the outer one's --bind string is unreadable, and this way it
+    # doesn't depend on the user's $SHELL being bash (fzf always runs
+    # --bind/--preview commands via `$SHELL -c`).
+    subagent_picker_script="$(mktemp)"
+    cat > "$subagent_picker_script" <<'PICKER_SH'
 #!/bin/sh
 file="$1"
-mode_file="$2"
+selection_file="$2"
 
-echo "File: $file"
-echo
-
-jq -s -r '
-  def text_content:
-    if (.message.content | type) == "array" then
-      [.message.content[]? | select(.type=="text") | .text] | join("\n")
-    else
-      (.message.content // "")
-    end;
-
-  .[]
-  | select(.type=="user" or .type=="assistant")
-  | text_content as $text
-  | select($text | gsub("\\s+"; "") | length > 0)
-  | "### " + (
-      if .type == "user" then "User"
-      elif .type == "assistant" then "Assistant"
-      else .type
-      end
-    ) + "\n" + ($text | .[0:1800]) + "\n"
-' "$file" 2>/dev/null | head -180
-
-subagents="$(
+rows="$(
   jq -s -r '
     .[]
     | select(.toolUseResult.outputFile? != null and .toolUseResult.canReadOutputFile == true)
@@ -257,41 +255,55 @@ subagents="$(
   ' "$file" 2>/dev/null
 )"
 
-[ -n "$subagents" ] || exit 0
+: > "$selection_file"
 
-if [ "$(cat "$mode_file" 2>/dev/null)" = "rich" ]; then
-  echo
-  echo "--- Subagents (ctrl-s to hide) ---"
-  printf '%s\n' "$subagents" | while IFS="$(printf '\t')" read -r agent_id desc output_file; do
-    [ -r "$output_file" ] || continue
-    echo
-    echo "## $desc ($agent_id)"
-    jq -s -r '
-      def text_content:
-        if (.message.content | type) == "array" then
-          [.message.content[]? | select(.type=="text") | .text] | join("\n")
-        else
-          (.message.content // "")
-        end;
-
-      .[]
-      | select(.type=="user" or .type=="assistant")
-      | text_content as $text
-      | select($text | gsub("\\s+"; "") | length > 0)
-      | "### " + (
-          if .type == "user" then "User"
-          elif .type == "assistant" then "Assistant"
-          else .type
-          end
-        ) + "\n" + ($text | .[0:800]) + "\n"
-    ' "$output_file" 2>/dev/null
-  done | head -160
-else
-  count="$(printf '%s\n' "$subagents" | grep -c .)"
-  echo
-  echo "($count subagent transcript(s) available -- ctrl-s to preview)"
+if [ -z "$rows" ]; then
+  echo "No subagents in this session."
+  printf 'Press enter to go back... '
+  read -r _ignored </dev/tty
+  exit 0
 fi
-PREVIEW_SH
+
+picked="$(
+  printf '%s\n' "$rows" | fzf \
+    --multi \
+    --delimiter="$(printf '\t')" \
+    --with-nth=2,1 \
+    --height=90% \
+    --layout=reverse \
+    --prompt='Select subagents (tab to toggle, enter to confirm)> ' \
+    --preview '
+      out={3}
+      if [ -r "$out" ]; then
+        jq -s -r "
+          def text_content:
+            if (.message.content | type) == \"array\" then
+              [.message.content[]? | select(.type==\"text\") | .text] | join(\"\n\")
+            else
+              (.message.content // \"\")
+            end;
+
+          .[]
+          | select(.type==\"user\" or .type==\"assistant\")
+          | text_content as \$text
+          | select(\$text | gsub(\"\\\\s+\"; \"\") | length > 0)
+          | \"### \" + (
+              if .type == \"user\" then \"User\"
+              elif .type == \"assistant\" then \"Assistant\"
+              else .type
+              end
+            ) + \"\n\" + (\$text | .[0:1800]) + \"\n\"
+        " "$out" 2>/dev/null | head -180
+      else
+        echo "(transcript no longer on disk)"
+      fi
+    '
+)"
+
+printf '%s\n' "$picked" | cut -f3 > "$selection_file"
+PICKER_SH
+
+    selection_file="$(mktemp)"
 
     selected="$(
       find "$proj" -maxdepth 1 -name "*.jsonl" -type f -printf "%T@ %p\n" \
@@ -305,17 +317,58 @@ PREVIEW_SH
             --delimiter='\t' \
             --with-nth=2,3 \
             --expect=ctrl-r \
-            --header='enter: export  ·  ctrl-r: export + subagents  ·  ctrl-s: toggle subagent preview' \
-            --bind "ctrl-s:execute-silent([ \"\$(cat \"$preview_mode_file\")\" = plain ] && printf rich > \"$preview_mode_file\" || printf plain > \"$preview_mode_file\")+refresh-preview" \
-            --preview "sh '$preview_script' {1} '$preview_mode_file'"
+            --header='enter: export  ·  ctrl-r: export + all subagents  ·  ctrl-s: choose which subagents' \
+            --preview '
+              file={1}
+              echo "File: $file"
+              echo
+              jq -s -r "
+                def text_content:
+                  if (.message.content | type) == \"array\" then
+                    [.message.content[]? | select(.type==\"text\") | .text] | join(\"\n\")
+                  else
+                    (.message.content // \"\")
+                  end;
+
+                .[]
+                | select(.type==\"user\" or .type==\"assistant\")
+                | text_content as \$text
+                | select(\$text | gsub(\"\\\\s+\"; \"\") | length > 0)
+                | \"### \" + (
+                    if .type == \"user\" then \"User\"
+                    elif .type == \"assistant\" then \"Assistant\"
+                    else .type
+                    end
+                  ) + \"\n\" + (\$text | .[0:1800]) + \"\n\"
+              " "$file" 2>/dev/null | head -180
+              count=$(jq -s -r "[.[] | select(.toolUseResult.outputFile? != null and .toolUseResult.canReadOutputFile == true)] | length" "$file" 2>/dev/null)
+              if [ -n "$count" ] && [ "$count" -gt 0 ] 2>/dev/null; then
+                echo
+                echo "($count subagent transcript(s) -- ctrl-s to choose, ctrl-r for all)"
+              fi
+            ' \
+            --bind "ctrl-s:execute(sh '$subagent_picker_script' {1} '$selection_file')+accept"
     )"
 
-    rm -f "$preview_mode_file" "$preview_script"
-
     key="$(printf '%s' "$selected" | sed -n '1p')"
-    [ "$key" = "ctrl-r" ] && include_subagents=1
-
     selected_file="$(printf "%s" "$selected" | sed -n '2p' | cut -f1)"
+
+    # ctrl-s isn't in --expect: it's not needed there since its own
+    # execute(...)+accept binding already ends in an accept, and having a
+    # key in both --expect and --bind means --expect's own default accept
+    # wins the race and the bound action (our nested picker) never runs.
+    # A non-empty selection_file is proof enough that ctrl-s's picker ran.
+    if [ -s "$selection_file" ]; then
+      include_subagents=1
+      # Kept (not removed below) — _claudeclip_subagent_context reads this
+      # file later, near the end of this function, and cleans it up itself.
+      subagent_filter="$selection_file"
+    else
+      [ "$key" = "ctrl-r" ] && include_subagents=1
+      rm -f "$selection_file"
+    fi
+
+    rm -f "$subagent_picker_script"
   else
     local files file i choice subagent_answer
     mapfile -t files < <(
@@ -365,6 +418,8 @@ PREVIEW_SH
     return 1
   }
 
+  echo "Exporting session..." >&2
+
   {
     echo "# Claude Conversation Export"
     echo
@@ -395,18 +450,20 @@ PREVIEW_SH
   } > "$out"
 
   if [ "$include_subagents" = "1" ]; then
-    _claudeclip_subagent_context "$selected_file" >> "$out"
+    _claudeclip_subagent_context "$selected_file" "$subagent_filter" >> "$out"
   else
     local available
     available="$(_claudeclip_subagent_row_count "$selected_file")"
     if [ -n "$available" ] && [ "$available" -gt 0 ] 2>/dev/null; then
-      echo "($available subagent transcript(s) available, not included -- ctrl-r in fzf, or answer \"y\" in the fallback prompt)" >&2
+      echo "($available subagent transcript(s) available, not included -- ctrl-r/ctrl-s in fzf, or answer \"y\" in the fallback prompt)" >&2
     fi
   fi
+  [ -n "$subagent_filter" ] && rm -f "$subagent_filter"
 
   echo "Export size: $(wc -c < "$out") bytes"
 
   if command -v xclip >/dev/null && [ -n "$DISPLAY" ]; then
+    echo "Copying to clipboard..." >&2
     xclip -selection clipboard -i < "$out"
     echo "Copied with xclip"
     echo "Clipboard size: $(xclip -selection clipboard -o 2>/dev/null | wc -c) bytes"
