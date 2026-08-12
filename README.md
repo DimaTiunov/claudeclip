@@ -45,6 +45,8 @@ the clipboard in one command.
   there's no picker to choose individually without `fzf`). Progress prints
   as each subagent transcript is pulled in. Skipped gracefully if a
   subagent's transcript file is no longer on disk (it lives under `/tmp`).
+- **Scriptable mode**: `--session <id-or-substring>` and `--output <path>`
+  bypass the picker and the clipboard, for wrapper scripts.
 - **One-shot re-copy** via `claudeclip_copy` if your clipboard got clobbered.
 
 ## Requirements
@@ -98,6 +100,25 @@ If you overwrote your clipboard after running `claudeclip`:
 ```bash
 claudeclip_copy
 ```
+
+### Scripted / non-interactive export
+
+For wrapper scripts (e.g. a cron job exporting a headless run's own
+transcript afterward) — no picker, no clipboard attempt:
+
+```bash
+claudeclip --session "nightly-2026-08-11" --output "data/nightly-logs/2026-08-11.md" ~/code/myproject
+```
+
+- `--session <id-or-substring>` skips the picker and resolves directly to a
+  session, matched by exact session ID (the `.jsonl` filename) or a
+  substring of its derived title. Exits non-zero if that matches zero or
+  more than one session, so it's safe to run unattended.
+- `--output <path>` writes to that path instead of the hardcoded
+  `/tmp/claude-conversation-export.md`.
+- The clipboard copy attempt is skipped automatically whenever `--session`
+  or `--output` is given, or whenever stdout isn't a terminal — no extra
+  flag needed.
 
 ### Example output
 

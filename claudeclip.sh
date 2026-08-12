@@ -5,14 +5,59 @@
 #   [ -f "$HOME/opensource/claudeclip/claudeclip.sh" ] && source "$HOME/opensource/claudeclip/claudeclip.sh"
 #
 # Provides:
-#   claudeclip [dir]  - pick a session (fzf) from the given/current project dir, export + copy
-#   claudeclip_copy   - re-copy the last export (/tmp/claude-conversation-export.md)
+#   claudeclip [dir]                             - pick a session (fzf) from the given/current project dir, export + copy
+#   claudeclip --session <id-or-substring> [dir]  - non-interactive: resolve directly, no clipboard attempt
+#   claudeclip [--output <path>] ...              - write the export somewhere other than /tmp/claude-conversation-export.md
+#   claudeclip_copy                               - re-copy the last export (/tmp/claude-conversation-export.md)
 
 claudeclip() {
   local root proj out selected selected_file abs_root include_subagents subagent_filter
-  root="${1:-$(pwd)}"
-  out="/tmp/claude-conversation-export.md"
+  local session_query="" output_override="" non_interactive=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --session)
+        session_query="$2"
+        shift 2
+        ;;
+      --session=*)
+        session_query="${1#--session=}"
+        shift
+        ;;
+      --output)
+        output_override="$2"
+        shift 2
+        ;;
+      --output=*)
+        output_override="${1#--output=}"
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*)
+        echo "claudeclip: unknown flag: $1" >&2
+        return 1
+        ;;
+      *)
+        root="$1"
+        shift
+        ;;
+    esac
+  done
+
+  root="${root:-$(pwd)}"
+  out="${output_override:-/tmp/claude-conversation-export.md}"
   include_subagents=0
+
+  # --session/--output are for scripting (e.g. a cron job exporting a
+  # headless run's own transcript) — no picker, no interactive prompts, and
+  # skip the clipboard copy attempt too (a non-interactive host may not even
+  # have an X11 session). Also fall back to this whenever stdout clearly
+  # isn't a terminal, so piping/redirecting claudeclip's output does the
+  # right thing without needing to remember the flags.
+  { [ -n "$session_query" ] || [ -n "$output_override" ] || [ ! -t 1 ]; } && non_interactive=1
 
   abs_root="$(realpath "$root")"
   # Claude Code encodes the project path by turning every character that is
@@ -224,7 +269,37 @@ claudeclip() {
     ' "$1" 2>/dev/null
   }
 
-  if command -v fzf >/dev/null; then
+  if [ -n "$session_query" ]; then
+    # Scriptable path: resolve directly instead of prompting, and fail loud
+    # (non-zero exit) on anything but exactly one match, so this is safe to
+    # run unattended.
+    local match_file match_count=0 title
+
+    while IFS= read -r match_file; do
+      [ -e "$match_file" ] || continue
+      _claudeclip_has_text "$match_file" || continue
+      title="$(_claudeclip_title "$match_file")"
+      [ "$title" != "Untitled session" ] || continue
+
+      if [ "$(basename "$match_file" .jsonl)" = "$session_query" ] \
+        || printf '%s' "$title" | grep -qF -- "$session_query"; then
+        selected_file="$match_file"
+        match_count=$((match_count + 1))
+      fi
+    done < <(find "$proj" -maxdepth 1 -name "*.jsonl" -type f)
+
+    case "$match_count" in
+      0)
+        echo "claudeclip: no session matching \"$session_query\" found in: $proj" >&2
+        return 1
+        ;;
+      1) ;;
+      *)
+        echo "claudeclip: \"$session_query\" matches $match_count sessions in $proj -- be more specific" >&2
+        return 1
+        ;;
+    esac
+  elif command -v fzf >/dev/null; then
     local subagent_picker_script selection_file key
 
     # ctrl-s hands off to a *nested* fzf run (fzf's `execute(...)` action
@@ -455,12 +530,21 @@ PICKER_SH
     local available
     available="$(_claudeclip_subagent_row_count "$selected_file")"
     if [ -n "$available" ] && [ "$available" -gt 0 ] 2>/dev/null; then
-      echo "($available subagent transcript(s) available, not included -- ctrl-r/ctrl-s in fzf, or answer \"y\" in the fallback prompt)" >&2
+      if [ "$non_interactive" -eq 1 ]; then
+        echo "($available subagent transcript(s) available, not included)" >&2
+      else
+        echo "($available subagent transcript(s) available, not included -- ctrl-r/ctrl-s in fzf, or answer \"y\" in the fallback prompt)" >&2
+      fi
     fi
   fi
   [ -n "$subagent_filter" ] && rm -f "$subagent_filter"
 
   echo "Export size: $(wc -c < "$out") bytes"
+
+  if [ "$non_interactive" -eq 1 ]; then
+    echo "$selected_file -> $out"
+    return 0
+  fi
 
   if command -v xclip >/dev/null && [ -n "$DISPLAY" ]; then
     echo "Copying to clipboard..." >&2
