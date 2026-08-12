@@ -45,6 +45,14 @@ the clipboard in one command.
   there's no picker to choose individually without `fzf`). Progress prints
   as each subagent transcript is pulled in. Skipped gracefully if a
   subagent's transcript file is no longer on disk (it lives under `/tmp`).
+- **Safe to paste into another chat**: known trigger-shaped text — slash-command
+  invocation blocks (`<command-message>`/`<command-name>`/`<command-args>`),
+  `<task-notification>` blocks, `<system-reminder>` tags, and "Background
+  command ... completed (exit code N)" notices — gets neutralized in the
+  export (angle brackets escaped, or an invisible character inserted) so
+  pasting the export into a *different* Claude Code chat can't make it react
+  as if those were live signals from its own session. Applies everywhere:
+  main transcript and subagent sections alike.
 - **One-shot re-copy** via `claudeclip_copy` if your clipboard got clobbered.
 
 ## Requirements
