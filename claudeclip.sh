@@ -6,13 +6,59 @@
 #
 # Provides:
 #   claudeclip [dir]  - pick a session (fzf) from the given/current project dir, export + copy
+#   claudeclip [--session <id-or-title-substring>] [--output <path>] [dir]
+#                     - non-interactive: --session skips the picker, --output
+#                       writes to <path>; either one also skips the clipboard
 #   claudeclip_copy   - re-copy the last export (/tmp/claude-conversation-export.md)
 
 claudeclip() {
   local root proj out selected selected_file abs_root include_subagents subagent_filter
-  root="${1:-$(pwd)}"
+  local session_given session_query no_clipboard title f
+  local -a matches
+  root=""
   out="/tmp/claude-conversation-export.md"
   include_subagents=0
+  subagent_filter=""
+  session_given=0
+  session_query=""
+  no_clipboard=0
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --session|--output)
+        # Checked here rather than defaulting to empty: an unset variable in
+        # a wrapper script ("--session $ID") must fail loudly, not silently
+        # fall through to the interactive picker on an unattended host.
+        [ "$#" -ge 2 ] && [ -n "$2" ] || {
+          echo "claudeclip: $1 needs a value" >&2
+          return 2
+        }
+        if [ "$1" = "--session" ]; then
+          session_given=1
+          session_query="$2"
+        else
+          out="$2"
+        fi
+        no_clipboard=1
+        shift 2
+        ;;
+      -*)
+        echo "claudeclip: unknown option: $1" >&2
+        return 2
+        ;;
+      *)
+        [ -n "$root" ] || root="$1"
+        shift
+        ;;
+    esac
+  done
+
+  [ -n "$root" ] || root="$(pwd)"
+
+  [ -d "$(dirname -- "$out")" ] || {
+    echo "claudeclip: output directory does not exist: $(dirname -- "$out")" >&2
+    return 1
+  }
 
   abs_root="$(realpath "$root")"
   # Claude Code encodes the project path by turning every character that is
@@ -224,7 +270,44 @@ claudeclip() {
     ' "$1" 2>/dev/null
   }
 
-  if command -v fzf >/dev/null; then
+  if [ "$session_given" = "1" ]; then
+    matches=()
+
+    # An exact session ID wins outright. Anything else is a case-insensitive
+    # substring match on the derived title, restricted to the same sessions
+    # the picker would list, so what --session can hit is what you could
+    # have clicked on.
+    case "$session_query" in
+      */*) ;;
+      *)
+        if [ -f "$proj/$session_query.jsonl" ]; then
+          matches=("$proj/$session_query.jsonl")
+        fi
+        ;;
+    esac
+
+    if [ "${#matches[@]}" -eq 0 ]; then
+      while IFS= read -r f; do
+        _claudeclip_has_text "$f" || continue
+        title="$(_claudeclip_title "$f")"
+        [ "$title" != "Untitled session" ] || continue
+        printf '%s' "$title" | grep -F -i -q -- "$session_query" && matches+=("$f")
+      done < <(find "$proj" -maxdepth 1 -name "*.jsonl" -type f | sort)
+    fi
+
+    if [ "${#matches[@]}" -eq 0 ]; then
+      echo "claudeclip: no session matching '$session_query' in $proj" >&2
+      return 1
+    elif [ "${#matches[@]}" -gt 1 ]; then
+      echo "claudeclip: '$session_query' matches ${#matches[@]} sessions, be more specific:" >&2
+      for f in "${matches[@]}"; do
+        printf '  %s  %s\n' "$(basename -- "$f" .jsonl)" "$(_claudeclip_title "$f")" >&2
+      done
+      return 1
+    fi
+
+    selected_file="${matches[0]}"
+  elif command -v fzf >/dev/null; then
     local subagent_picker_script selection_file key
 
     # ctrl-s hands off to a *nested* fzf run (fzf's `execute(...)` action
@@ -447,11 +530,14 @@ PICKER_SH
           end
         ) + "\n\n" + $text
     ' "$selected_file"
-  } > "$out"
+  } > "$out" || {
+    echo "claudeclip: export failed: $selected_file" >&2
+    return 1
+  }
 
   if [ "$include_subagents" = "1" ]; then
     _claudeclip_subagent_context "$selected_file" "$subagent_filter" >> "$out"
-  else
+  elif [ "$session_given" != "1" ]; then
     local available
     available="$(_claudeclip_subagent_row_count "$selected_file")"
     if [ -n "$available" ] && [ "$available" -gt 0 ] 2>/dev/null; then
@@ -461,6 +547,13 @@ PICKER_SH
   [ -n "$subagent_filter" ] && rm -f "$subagent_filter"
 
   echo "Export size: $(wc -c < "$out") bytes"
+
+  # --session/--output mean a script is driving this: there may be no X11 (or
+  # nobody to paste for), and the clipboard is a global side effect.
+  if [ "$no_clipboard" = "1" ]; then
+    echo "$selected_file -> $out"
+    return 0
+  fi
 
   if command -v xclip >/dev/null && [ -n "$DISPLAY" ]; then
     echo "Copying to clipboard..." >&2
