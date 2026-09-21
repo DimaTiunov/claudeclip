@@ -270,6 +270,37 @@ claudeclip() {
     ' "$1" 2>/dev/null
   }
 
+  # Claude Code's own harness represents slash-command invocations and
+  # background-task/subagent notifications as literal text patterns inside
+  # message content (e.g. <command-name>/foo</command-name>, or a plain
+  # "Background command "..." completed (exit code N)" line). If a session
+  # transcript contains one of these — because the user ran a command, or a
+  # subagent completed — and that transcript gets exported and pasted into
+  # a *different* Claude Code chat, the new chat's own harness can react to
+  # it as if it were a live signal from its own current session, not just
+  # historical text. This rewrites known trigger-shaped substrings so they
+  # no longer match literally, while staying fully readable to a human.
+  _claudeclip_sanitize_triggers() {
+    local file="$1" tag
+
+    for tag in command-message command-name command-args \
+               system-reminder \
+               task-notification task-id tool-use-id output-file \
+               status summary note result usage \
+               subagent_tokens tool_uses duration_ms \
+               worktree worktreePath; do
+      sed -i \
+        -e "s/<${tag}>/\&lt;${tag}\&gt;/g" \
+        -e "s/<\/${tag}>/\&lt;\/${tag}\&gt;/g" \
+        "$file"
+    done
+
+    # Not tag-shaped, so there's nothing to escape — break the literal
+    # phrase instead, with a zero-width space that's invisible when read
+    # but means the exact substring no longer appears in the text.
+    sed -i "s/Background command/Background$(printf '\xe2\x80\x8b') command/g" "$file"
+  }
+
   if [ "$session_given" = "1" ]; then
     matches=()
 
@@ -545,6 +576,8 @@ PICKER_SH
     fi
   fi
   [ -n "$subagent_filter" ] && rm -f "$subagent_filter"
+
+  _claudeclip_sanitize_triggers "$out"
 
   echo "Export size: $(wc -c < "$out") bytes"
 
