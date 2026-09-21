@@ -53,6 +53,8 @@ the clipboard in one command.
   pasting the export into a *different* Claude Code chat can't make it react
   as if those were live signals from its own session. Applies everywhere:
   main transcript and subagent sections alike.
+- **Non-interactive mode** for scripts and headless hosts: `--session` skips
+  the picker, `--output` picks the file, and neither touches the clipboard.
 - **One-shot re-copy** via `claudeclip_copy` if your clipboard got clobbered.
 
 ## Requirements
@@ -98,6 +100,28 @@ select — via `tab` — only the ones you actually want.
 ```bash
 claudeclip ~/code/some-other-project
 ```
+
+### Export without the picker (scripts, cron, headless hosts)
+
+```bash
+claudeclip --session "nightly-2026-08-11" --output data/nightly-logs/2026-08-11.md
+```
+
+- `--session <id-or-title-substring>` skips the picker. An exact session ID
+  wins; otherwise the value is matched (case-insensitively) against session
+  titles, among the same sessions the picker would list. Zero matches or more
+  than one is an error (exit code 1, candidates listed on stderr), so it is
+  safe to run unattended.
+- `--output <path>` writes the Markdown to `<path>` instead of
+  `/tmp/claude-conversation-export.md`. The directory must already exist.
+- Giving either flag skips the `xclip` copy. They combine with a project
+  directory as usual: `claudeclip --session foo ~/code/other-project`.
+- Subagent transcripts are not included in this mode.
+- Missing/empty flag values and unknown options exit with code 2.
+
+`--output` on its own still opens the picker; it only redirects the file.
+`claudeclip_copy` keeps working off the default path, so it won't see files
+written with `--output`.
 
 ### Re-copy the last export
 
